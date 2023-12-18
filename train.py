@@ -1,29 +1,34 @@
-# train.py
-
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
-import pandas as pd
+from pyspark.sql import SparkSession
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import VectorAssembler, StringIndexer
+from pyspark.ml.classification import RandomForestClassifier
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 import joblib
 
-# Iris veri setini yükle
-iris_data = pd.read_csv('train.csv')  # Veri setinizi uygun bir şekilde değiştirin
+# Spark Session oluştur
+spark = SparkSession.builder.appName("IrisClassifier").getOrCreate()
 
-# Özellikler ve etiketleri ayır
-X = iris_data.drop('species', axis=1)
-y = iris_data['species']
+# Veriyi oku (train.csv dosyasını uygun şekilde değiştirin)
+iris_data = spark.read.csv('train.csv', header=True, inferSchema=True)
 
-# Eğitim ve test setlerini oluştur
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# StringIndexer ile etiketleri sayısal türlere dönüştür
+label_indexer = StringIndexer(inputCol="species", outputCol="indexed_species_temp")
+iris_data = label_indexer.fit(iris_data).transform(iris_data)
 
-# Modeli eğit
-model = RandomForestClassifier(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)
+# Önceki adımın ardından yeni bir adım ekleyerek sütun adını değiştir
+iris_data = iris_data.withColumnRenamed("indexed_species_temp", "indexed_species")
 
-# Modeli değerlendir
-y_pred = model.predict(X_test)
-accuracy = accuracy_score(y_test, y_pred)
-print(f'Model Accuracy: {accuracy}')
+# Özellikler ve etiketleri bir araya getir
+feature_cols = iris_data.columns[:-2]  # "species" ve "indexed_species" sütunlarını çıkart
+vector_assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+classifier = RandomForestClassifier(labelCol="indexed_species", featuresCol="features", numTrees=100, seed=42)
+pipeline = Pipeline(stages=[label_indexer, vector_assembler, classifier])
+
+# Veriyi eğit
+model = pipeline.fit(iris_data)
 
 # Modeli kaydet
-joblib.dump(model, 'iris_model.joblib')  # Modeli uygun bir şekilde kaydedin
+model.write().overwrite().save("iris_model_spark")
+
+# Spark Session'ı kapat
+spark.stop()

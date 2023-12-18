@@ -1,70 +1,52 @@
-# test.py
-
-import time
-from kafka import KafkaProducer, KafkaConsumer
+import findspark
 from pyspark.sql import SparkSession
-import joblib
+from pyspark.ml import PipelineModel
+from pyspark.sql.types import StructType, StructField, FloatType
 import pandas as pd
-import json
+# PYSPARK_PYTHON değişkenini belirle
+findspark.init()
 
-# Kafka konfigürasyonları
-topic = 'iris'
-bootstrap_servers = 'localhost:9092'
+# Spark Session oluştur
+spark = SparkSession.builder.master("local").appName("IrisTest").getOrCreate()
 
-# Modeli yükleyen fonksiyon
-def load_model():
-    return joblib.load('iris_model.joblib')  # Modeli uygun bir şekilde yükleyin
+# Eğitilmiş modeli yükle
+model = PipelineModel.load("iris_model_spark")
 
-# Veriyi modele veren ve tahmin yapan fonksiyon
+# Test verisi şeması
+schema = StructType([
+    StructField("sepal_length", FloatType(), True),
+    StructField("sepal_width", FloatType(), True),
+    StructField("petal_length", FloatType(), True),
+    StructField("petal_width", FloatType(), True)
+])
+
+# Test verilerini oku ve Spark DataFrame'e dönüştür
+def read_csv_iter(file_path, schema, chunksize=1):
+    for chunk in pd.read_csv(file_path, chunksize=chunksize, dtype={'sepal_length': float, 'sepal_width': float, 'petal_length': float, 'petal_width': float}):
+        spark_df = spark.createDataFrame(chunk, schema=schema)
+        yield spark_df
+
 def predict_data(model, data):
-    # Sadece sayısal özellikleri al
-    numerical_features = data[['sepal_length', 'sepal_width', 'petal_length', 'petal_width']]
-    
-    # Tahmin yap
-    prediction = model.predict(numerical_features)
-    return prediction
+    prediction = model.transform(data)
+    return prediction.select("sepal_length", "sepal_width", "petal_length", "petal_width", "prediction")
 
-# Dosyadaki verileri satır satır okuyan ve başa dönen fonksiyon
-def read_csv_iter(file_path):
-    while True:
-        for chunk in pd.read_csv(file_path, chunksize=1):
-            yield chunk
-
-# Kafka'ya veri gönderen fonksiyon
-def send_data_to_kafka(producer, data):
-    # Veriyi JSON formatına çevir
-    json_data = json.dumps(data.to_dict(orient='records'))
-    
-    # JSON veriyi bytes türüne çevir
-    value_bytes = bytes(json_data, 'utf-8')
-    
-    producer.send(topic, value=value_bytes)
-
-# Ana işlemi gerçekleştiren fonksiyon
 def main():
-    # Kafka producer konfigürasyonu
-    producer = KafkaProducer(bootstrap_servers=bootstrap_servers)
-    
-    # Modeli yükle
-    model = load_model()
-    
-    # Test verilerini satır satır okuyan iterator
-    test_data_iter = read_csv_iter('test.csv')
-    
-    # Ana döngü
-    while True:
-        # Bir sonraki test verisini al
-        test_data = next(test_data_iter)
-        
-        # Veriyi modele ver
-        prediction = predict_data(model, test_data)
-        print(f'Model Prediction: {prediction}')
-        
-        # Kafka'ya veriyi gönder
-        send_data_to_kafka(producer, test_data)
-        
-        # 1 saniye bekle
-        time.sleep(1)
+    test_data_iter = read_csv_iter("test.csv", schema)
 
-if __name__ == '__main__':
+    while True:
+        try:
+            # Bir sonraki test verisini al
+            test_data = next(test_data_iter)
+
+            # Veriyi modele ver ve çıktıyı al
+            prediction = predict_data(model, test_data)
+
+            # Çıktıyı konsola yazdır
+            prediction.show()
+
+        except StopIteration:
+            # Dosyanın sonuna gelindiğinde dosyayı tekrar başa al
+            test_data_iter = read_csv_iter("test.csv", schema)
+
+if __name__ == "__main__":
     main()
